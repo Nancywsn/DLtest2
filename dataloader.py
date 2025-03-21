@@ -6,14 +6,19 @@ from torch.utils.data import Dataset, DataLoader
 import cv2
 from PIL import Image
 import numpy as np
-import os, time
 import random
+
 random.seed(0)
 
+from albumentations import Compose, HorizontalFlip, Rotate, RandomBrightnessContrast
 
+base_aug = Compose([
+    HorizontalFlip(p=0.5),
+    Rotate(limit=15, p=0.5),
+    RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.3)
+])
 readvdnames = lambda x: open(x).read().rstrip().split('\n')
 
-################################# DEFINE DATASET #################################
 class TinySegData(Dataset):
     def __init__(self, db_root="TinySeg", img_size=256, phase='train'):
         classes = ['person', 'bird', 'car', 'cat', 'plane', ]
@@ -33,6 +38,7 @@ class TinySegData(Dataset):
         self.db_root = db_root
         self.img_size = img_size
 
+        # 颜色抖动变换，用于在数据增强过程中随机改变图像的亮度、对比度、饱和度和色调
         self.color_transform = torchvision.transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2)
 
         if not self.phase == 'train':
@@ -52,13 +58,16 @@ class TinySegData(Dataset):
         image = Image.open(sample[0])
 
         if random.randint(0, 1) > 0:
-            image = self.color_transform(image)
+            image = self.color_transform(image) # 随机颜色抖动变换
         image = np.asarray(image)[..., ::-1]     # to BGR
+
+        # 打开分割标注图像，将其转换为调色板模式（P 模式），然后转换为 NumPy 数组，并将数据类型转换为 uint8
         seg_gt = (np.asarray(Image.open(sample[1]).convert('P'))).astype(np.uint8)
 
         image = image.astype(np.float32)
         image = image / 127.5 - 1        # -1~1
 
+        # 随机在水平方向上翻转图像和分割标注
         if random.randint(0, 1) > 0:
             image = image[:, ::-1, :]       # HWC
             seg_gt = seg_gt[:, ::-1]
@@ -81,6 +90,7 @@ class TinySegData(Dataset):
         image = image[miny:maxy, minx:maxx, :].copy()
         seg_gt = seg_gt[miny:maxy, minx:maxx].copy()
 
+        # 如果要求的size不是256，则进行resize
         if self.img_size != 256:
             new_size = (self.img_size, self.img_size)
             image = cv2.resize(image, new_size, interpolation=cv2.INTER_LINEAR)
@@ -88,6 +98,13 @@ class TinySegData(Dataset):
 
         image = np.transpose(image, (2, 0, 1))      # To CHW
 
+        # 基础数据增强
+        # augmented = base_aug(image=image, mask=seg_gt)
+        # image = augmented['image']
+        # seg_gt = augmented['mask']
+
+
+        # 图像和分割标注图像进行拼接
         # cv2.imwrite("test.png", np.concatenate([(image[0]+1)*127.5, seg_gt*255], axis=0))
         return image, seg_gt, sample
 

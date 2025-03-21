@@ -1,16 +1,5 @@
-import torch
-import torchvision
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-import cv2
-from PIL import Image
 import numpy as np
-import os, time
-import random
-random.seed(0)
-
-from models.pspnet import PSPNet
 
 ################################# FUNCTIONS #################################
 def get_confusion_matrix(gt_label, pred_label, class_num):
