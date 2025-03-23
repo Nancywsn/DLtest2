@@ -8,16 +8,30 @@ from PIL import Image
 import numpy as np
 import os, time
 import random
-random.seed(0)
 import torch.optim.lr_scheduler as lr_scheduler
 
+from models.ccnet import CCNet
 from models.pspnet import PSPNet
 from dataloader import TinySegData
 from evalute import get_confusion_matrix_for_3d,get_confusion_matrix
 import pandas as pd
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+import argparse
 import matplotlib.pyplot as plt
+import pickle
+
+# 设置随机种子
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+
+# 保存随机种子的状态
+state_dict = {
+    'torch': torch.get_rng_state(),
+    'numpy': np.random.get_state(),
+    'random': random.getstate()
+}
 
 
 class DiceLoss(nn.Module):
@@ -35,11 +49,8 @@ class DiceLoss(nn.Module):
         return 1 - dice.mean()
     
 def draw_metrics(csv_path, output_dir):
-
     metrics = pd.read_csv(csv_path)
-
     plt.figure(figsize=(10, 5))
-
     plt.subplot(1, 2, 1)
     plt.plot(metrics['epoch'], metrics['train_loss'], label='Train Loss')
     plt.plot(metrics['epoch'], metrics['val_loss'], label='Validation Loss')
@@ -61,35 +72,55 @@ def draw_metrics(csv_path, output_dir):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Train segmentation model')
+    parser.add_argument('--model', type=str, default='pspnet', choices=['pspnet', 'ccnet'], help='Model to use for training')
+    parser.add_argument('--batchsize', type=int, default=64, help='Batch size for training')
+    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate for the optimizer')
+    parser.add_argument('--tmax', type=int, default=20, help='Maximum number of iterations for CosineAnnealingLR')
+    parser.add_argument('--etamin', type=float, default=1e-5, help='Minimum learning rate for CosineAnnealingLR')
+    args = parser.parse_args()
+
     IMG_SIZE = 128
     print ("=> the training size is {}".format(IMG_SIZE))
     classes=6
-    epoch = 50
+    CLASSES = ['person', 'cat', 'plane', 'car', 'bird']
+    epoch = 150
     best_miou=0
     early_stop_patience = 10
+    best_model_name = args.model+"_best_model.pth"
 
-    train_loader = DataLoader(TinySegData(img_size=IMG_SIZE, phase='train'), batch_size=32, shuffle=True, num_workers=8)
+    mkdirs = lambda x: os.makedirs(x, exist_ok=True)
+    ckpt_dir = "ckpt_seg"
+    mkdirs(ckpt_dir)
+    output_dir = "output_"+args.model
+    mkdirs(output_dir)
+    csv_path = os.path.join(output_dir, "metrics.csv")
+    if os.path.exists(csv_path):
+        os.remove(csv_path)
+
+    # 随机种子保存到文件
+    seed_path = os.path.join(output_dir, "random_seeds.pkl")
+    with open(seed_path, 'wb') as f:
+        pickle.dump(state_dict, f)
+
+    train_loader = DataLoader(TinySegData(img_size=IMG_SIZE, phase='train'), batch_size=args.batchsize, shuffle=True, num_workers=8)
     val_loader = DataLoader(TinySegData(phase='val'), batch_size=1, shuffle=False, num_workers=0)
 
-    model = PSPNet(n_classes=classes, pretrained=True)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+    # model = PSPNet(n_classes=classes, pretrained=True)
+    # # model = CCNet(num_classes=classes)
 
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=20, eta_min=1e-5)
+    if args.model == 'pspnet':
+        model = PSPNet(n_classes=classes, pretrained=True)
+    elif args.model == 'ccnet':
+        model = CCNet(num_classes=classes)
+
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.tmax, eta_min=args.etamin)
 
     # criterion = torch.nn.CrossEntropyLoss()
     criterion_ce = nn.CrossEntropyLoss()
     criterion_dice = DiceLoss(num_classes=classes)
-
-
-    mkdirs = lambda x: os.makedirs(x, exist_ok=True)
-    # model.load_state_dict(torch.load("ckpt_seg/epoch_79_iou0.88.pth"))
-    ckpt_dir = "ckpt_seg"
-    mkdirs(ckpt_dir)
-    output_dir = "output"
-    mkdirs(output_dir)
-    csv_path = os.path.join(output_dir, "metrics.csv")    
-
 
     for i in range(0, epoch):
         # train
@@ -99,15 +130,16 @@ if __name__ == "__main__":
 
         epoch_start = time.time()
         for j, (images, seg_gts, rets) in enumerate(train_loader):
-            images = images.cuda()
-            seg_gts = seg_gts.cuda()
+            images = images.cuda() #torch.Size([32, 3, 128, 128])
+            seg_gts = seg_gts.cuda() #torch.Size([32, 128, 128])
+            # print(images.shape)
+            # print(seg_gts.shape)
 
             optimizer.zero_grad()
             seg_logit = model(images)
 
-            # loss_seg = criterion(seg_logit, seg_gts.long())
-            # loss = loss_seg
-
+            # print(seg_logit.shape) #torch.Size([64, 6, 128, 128])
+            # print(seg_gts.shape) #torch.Size([64, 128, 128])
             loss_ce = criterion_ce(seg_logit, seg_gts.long())
             loss_dice = criterion_dice(seg_logit, seg_gts.long())
             loss_seg = loss_ce + loss_dice
@@ -119,8 +151,10 @@ if __name__ == "__main__":
 
             if j % 10 == 0:
                 seg_preds = torch.argmax(seg_logit, dim=1)
-                seg_preds_np = seg_preds.detach().cpu().numpy()
-                seg_gts_np = seg_gts.cpu().numpy()
+                seg_preds_np = seg_preds.detach().cpu().numpy() #(32, 128, 128)
+                seg_gts_np = seg_gts.cpu().numpy() #(32, 128, 128)
+                # print(seg_preds_np.shape)
+                # print(seg_gts_np.shape)
 
                 # 计算混淆矩阵，基于混淆矩阵计算每个类别的交并比（IoU）和平均交并比（mean IoU）
                 confusion_matrix_result = get_confusion_matrix_for_3d(seg_gts_np, seg_preds_np, class_num=classes)
@@ -128,21 +162,31 @@ if __name__ == "__main__":
                 res = confusion_matrix_result.sum(0)
                 tp = np.diag(confusion_matrix_result)
                 IU_array = (tp / np.maximum(1.0, pos + res - tp))
-                # print(IU_array)
+                # print(IU_array) #[0.81807475 0.60226701 0.70165469 0.25323819 0.5943455  0.        ]
+                # print(IU_array.size) #6
                 mean_IU = IU_array.mean()
-                # print(mean_IU)
+                # print(mean_IU) #0.49493002184574514
+
+                # plt.figure(figsize=(10, 8))
+                # sns.heatmap(confusion_matrix_result, annot=True, fmt=".2f", xticklabels=CLASSES, yticklabels=CLASSES)
+                # plt.xlabel('Predicted')
+                # plt.ylabel('True')
+                # plt.title('confusion_matrix_result')
+                # plt.savefig(os.path.join(output_dir, "confusion_matrix_result.png"))
 
                 log_str = "[E{}/{} - {}] ".format(i, epoch, j)
                 log_str += "loss[seg]: {:0.4f}, miou: {:0.4f}, lr: {:0.6f}".format(loss_seg.item(), mean_IU, optimizer.param_groups[0]['lr'])
                 print(log_str)
 
-                # 实时可视化预测结果
-                images_np = np.transpose((images.cpu().numpy()+1)*127.5, (0, 2, 3, 1))
-                n, h, w, c = images_np.shape
-                images_np = images_np.reshape(n*h, w, -1)[:, :, 0]
-                seg_preds_np = seg_preds_np.reshape(n*h, w)
-                visual_np = np.concatenate([images_np, seg_preds_np*40], axis=1)       # NH * W
-                cv2.imwrite('visual.png', visual_np)
+                # # 实时可视化预测结果
+                # images_np = np.transpose((images.cpu().numpy()+1)*127.5, (0, 2, 3, 1)).astype(np.uint8)
+                # n, h, w, c = images_np.shape
+                # images_np = images_np.reshape(n * h, w, c)
+                # seg_preds_np = seg_preds_np.reshape(n*h, w)
+                # seg_preds_color = cv2.applyColorMap((seg_preds_np * 40).astype(np.uint8), cv2.COLORMAP_JET)
+                # visual_np = np.concatenate([images_np,seg_preds_color], axis=1)       # NH * W
+                # cv2.imwrite(os.path.join(output_dir, "train_visual.png"), visual_np)
+
                 epoch_iou.append(mean_IU)
 
         epoch_iou = np.mean(epoch_iou)
@@ -152,71 +196,97 @@ if __name__ == "__main__":
         model.eval()
         val_iou = []
         loss_eval=[]
-        with torch.no_grad():
-            for images, seg_gts, sets in val_loader:
-                if torch.cuda.is_available():
-                    images, seg_gts = images.cuda(), seg_gts.cuda()
+        dice = []
+        val_pixel_accuracy= []
+        confusion = np.zeros((classes,classes))
+        
+        for images, seg_gts, sets in val_loader:
+            with torch.no_grad():
+                images, seg_gts = images.cuda(), seg_gts.cuda()
 
                 seg_logit = model(images)
                 seg_preds = torch.argmax(seg_logit, dim=1)
                 seg_preds_np = seg_preds.detach().cpu().numpy()
                 seg_gts_np = seg_gts.cpu().numpy()
 
-                loss_ce = criterion_ce(seg_logit, seg_gts.long())
+                loss_ce = criterion_ce(seg_logit, seg_gts.long()) 
                 loss_dice = criterion_dice(seg_logit, seg_gts.long())
                 loss = loss_ce + loss_dice
                 loss_eval.append(loss.item())
-
-                # 计算混淆矩阵并归一化
-                # cm = confusion_matrix(seg_gts_np.flatten(), seg_preds_np.flatten(), normalize='true')
-                # # print(cm)
-                # pos = cm.sum(1)
-                # res = cm.sum(0)
-                # tp = np.diag(cm)
-                # IU_array = (tp / np.maximum(1.0, pos + res - tp))
-                # mean_IU = IU_array.mean()
-                # print(mean_IU)
+                dice.append(loss_dice.item())
 
                 confusion_matrix_result = get_confusion_matrix_for_3d(seg_gts_np, seg_preds_np, class_num=classes)
-                pos = confusion_matrix_result.sum(1)
-                res = confusion_matrix_result.sum(0)
-                tp = np.diag(confusion_matrix_result)
-                IU_array = (tp / np.maximum(1.0, pos + res - tp))
-                print(IU_array.size)
-                mean_IU = IU_array.mean()
-                print(mean_IU)
-                val_iou.append(mean_IU)
-
+                confusion += confusion_matrix_result
 
                 # 计算像素准确率
                 correct_pixels = np.sum(seg_preds_np == seg_gts_np)
                 total_pixels = seg_gts_np.size
                 pixel_accuracy = correct_pixels / total_pixels
+                val_pixel_accuracy.append(pixel_accuracy)
 
-        val_iou = np.mean(val_iou)
-        loss_eval = np.mean(loss_eval)     
-        print(f"Eval: Validation mIoU: {val_iou:.4f}, Validation loss: {loss_eval:.4f}, Pixel Accuracy: {pixel_accuracy:.4f}")
+                # # 实时可视化预测结果
+                # images_np = np.transpose((images.cpu().numpy()+1)*127.5, (0, 2, 3, 1)).astype(np.uint8)
+                # n, h, w, c = images_np.shape
+                # images_np = images_np.reshape(n * h, w, c)
+                # seg_preds_np = seg_preds_np.reshape(n*h, w)
+                # seg_preds_color = cv2.applyColorMap((seg_preds_np * 40).astype(np.uint8), cv2.COLORMAP_JET)
+                # visual_np = np.concatenate([images_np,seg_preds_color], axis=1)       # NH * W
+                # cv2.imwrite(os.path.join(output_dir, "eval_visual.png"), visual_np)
+
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(confusion, annot=True, fmt=".2f", xticklabels=CLASSES, yticklabels=CLASSES)
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
+        plt.savefig(os.path.join(output_dir, "confusion.png"))
+
+        pos = confusion.sum(1)
+        res = confusion.sum(0)
+        tp = np.diag(confusion)
+        IU_array = (tp / np.maximum(1.0, pos + res - tp))
+        mean_IU = IU_array.mean()
+        print(mean_IU)
+        val_iou = mean_IU
+        val_pixel_accuracy = np.mean(val_pixel_accuracy)    
+        loss_eval = np.mean(loss_eval)
+        dice = np.mean(dice)     
+        print(f"Eval: Validation mIoU: {val_iou:.4f}, Validation loss: {loss_eval:.4f}, Pixel Accuracy: {val_pixel_accuracy:.4f}")
+        
         epoch_end = time.time()
         epoch_time = round(epoch_end-epoch_start, 2)
         print ("=> This epoch costs {}s...".format(epoch_time))
+
+        epoch_metrics = {
+            'epoch': i,
+            'train_loss': np.mean(epoch_loss),
+            'val_loss': loss_eval,
+            'val_miou': val_iou,
+            'pixel_accuracy': val_pixel_accuracy,
+            'dice': dice
+        }
         # 保存每个epoch的损失和mIoU到csv文件
         with open(csv_path, "a") as f:
             if i == 0:
-                f.write("epoch,train_loss,val_loss,val_miou,pixel_accuracy\n")
-            f.write(f"{i},{np.mean(epoch_loss)},{loss_eval},{val_iou},{pixel_accuracy}\n")
-       
+                f.write("epoch,train_loss,val_loss,val_miou,pixel_accuracy,dice\n")
+            f.write(f"{i},{np.mean(epoch_loss):.4f},{loss_eval:.4f},{val_iou:.4f},{val_pixel_accuracy:.4f},{dice:.4f}\n")
+           
         # 早停条件
         if val_iou > best_miou:
             best_miou = val_iou
             no_improvement_epochs = 0
-            torch.save(model.state_dict(), os.path.join(ckpt_dir, f"best_model.pth"))
+            best_epoch_metrics = epoch_metrics
+            torch.save(model.state_dict(), os.path.join(ckpt_dir, best_model_name))
         else:
             no_improvement_epochs += 1        
+
         if no_improvement_epochs >= early_stop_patience:
             print(f"Early stopping at epoch {i} due to no improvement in validation mIoU for {early_stop_patience} epochs.")
+            print(f"Best epoch metrics: {best_epoch_metrics}")
             break
+        print("no_improvement_epochs:"+str(no_improvement_epochs))
+
         # 在每个 epoch 结束时更新学习率
         scheduler.step()
-
-
+    
+    draw_metrics(csv_path, output_dir)
 
