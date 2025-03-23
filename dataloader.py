@@ -16,9 +16,9 @@ from albumentations import Compose, HorizontalFlip, Rotate, RandomBrightnessCont
 readvdnames = lambda x: open(x).read().rstrip().split('\n')
 
 class TinySegData(Dataset):
-    def __init__(self, db_root="TinySeg", img_size=256, phase='train'):
-        classes = ['person', 'cat', 'plane', 'car', 'bird']
-        seg_ids = [1, 2, 3, 4, 5]
+    def __init__(self, db_root="TinySeg", img_size=256, phase='train',aug='none'):
+        # classes = ['person', 'cat', 'plane', 'car', 'bird']
+        # seg_ids = [1, 2, 3, 4, 5]
 
         templ_image = db_root + "/JPEGImages/{}.jpg"
         templ_mask = db_root + "/Annotations/{}.png"
@@ -33,9 +33,7 @@ class TinySegData(Dataset):
         self.phase = phase
         self.db_root = db_root
         self.img_size = img_size
-
-        # 颜色抖动变换，用于在数据增强过程中随机改变图像的亮度、对比度、饱和度和色调
-        self.color_transform = torchvision.transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2)
+        self.aug = aug
 
         if not self.phase == 'train':
             print ("resize and augmentation will not be applied...")
@@ -66,9 +64,6 @@ class TinySegData(Dataset):
         sample = self.samples[idx]
         image = Image.open(sample[0])
 
-        # 随机颜色抖动变换
-        # if random.randint(0, 1) > 0:
-        #     image = self.color_transform(image) 
         image = np.asarray(image)[..., ::-1]     # to BGR
 
         # 打开分割标注图像，将其转换为调色板模式（P 模式），然后转换为 NumPy 数组，并将数据类型转换为 uint8
@@ -77,39 +72,26 @@ class TinySegData(Dataset):
         image = image.astype(np.float32)
         image = image / 127.5 - 1        # -1~1
 
-        # 基础数据增强
-        # print (image.shape, seg_gt.shape)
-        augmented = self.base_aug(image=image, mask=seg_gt)
-        image = augmented['image']
-        seg_gt = augmented['mask']
+        #'none', 'basic', 'advanced'
+        if self.aug == 'basic':
+            # 基础数据增强
+            # print (image.shape, seg_gt.shape)
+            augmented = self.base_aug(image=image, mask=seg_gt)
+            image = augmented['image']
+            seg_gt = augmented['mask']
+        elif self.aug == 'advanced':    
+            # 基础数据增强
+            # print (image.shape, seg_gt.shape)
+            augmented = self.base_aug(image=image, mask=seg_gt)
+            image = augmented['image']
+            seg_gt = augmented['mask']
+            # 高级数据增强
+            augmented = self.advanced_aug(image=image, mask=seg_gt)
+            image = augmented['image']
+            seg_gt = augmented['mask']
+            # print("advanced augmentation")
 
-        # 高级数据增强
-        augmented = self.advanced_aug(image=image, mask=seg_gt)
-        image = augmented['image']
-        seg_gt = augmented['mask']
 
-        # # 随机在水平方向上翻转图像和分割标注
-        # if random.randint(0, 1) > 0:
-        #     image = image[:, ::-1, :]       # HWC
-        #     seg_gt = seg_gt[:, ::-1]
-
-        # # random crop to 256x256
-        # height, width = image.shape[0], image.shape[1]
-        # if height == width:
-        #     miny, maxy = 0, 256
-        #     minx, maxx = 0, 256
-        # elif height > width:
-        #     miny = np.random.randint(0, height-256)
-        #     maxy = miny+256
-        #     minx = 0
-        #     maxx = 256
-        # else:
-        #     miny = 0
-        #     maxy = 256
-        #     minx = np.random.randint(0, width-256)
-        #     maxx = minx+256
-        # image = image[miny:maxy, minx:maxx, :].copy()
-        # seg_gt = seg_gt[miny:maxy, minx:maxx].copy()
 
         # 如果要求的size不是256，则进行resize
         if self.img_size != 256:
@@ -128,16 +110,31 @@ class TinySegData(Dataset):
 
         image = image.astype(np.float32)
         image = image / 127.5 - 1        # -1~1
+
+        # 如果要求的size不是256，则进行resize
+        if self.img_size != 256:
+            new_size = (self.img_size, self.img_size)
+            image = cv2.resize(image, new_size, interpolation=cv2.INTER_LINEAR)
+            seg_gt = cv2.resize(seg_gt, new_size, interpolation=cv2.INTER_NEAREST)
+
         image = np.transpose(image, (2, 0, 1))
+
+        # sample = self.samples[idx]
+        # image = cv2.imread(sample[0])
+        # seg_gt = (np.asarray(Image.open(sample[1]).convert('P'))).astype(np.uint8)
+        # image = image.astype(np.float32)
+        # image = image / 127.5 - 1        # -1~1
+        # image = np.transpose(image, (2, 0, 1))
 
         return image, seg_gt, sample
     
     
 if __name__ == "__main__":
     classes=6
-    CLASSES = ['person', 'cat', 'plane', 'car', 'bird']
+    CLASSES = ['background', 'person', 'cat', 'plane', 'car', 'bird']
+    IMG_SIZE = 128
 
-    val_loader = DataLoader(TinySegData(phase='train'), batch_size=1, shuffle=False, num_workers=0)
+    val_loader = DataLoader(TinySegData(img_size=IMG_SIZE, phase='val'), batch_size=1, shuffle=False, num_workers=0)
     for i, (image, seg_gt, sample) in enumerate(val_loader):
         print (image.shape, seg_gt.shape, sample)
 

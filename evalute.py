@@ -58,7 +58,7 @@ if __name__ == "__main__":
     classes = 6
     
     # Define class names
-    CLASSES = ['person', 'cat', 'plane', 'car', 'bird']
+    CLASSES = ['background', 'person', 'cat', 'plane', 'car', 'bird']
 
     model = PSPNet(n_classes=classes)
     model.load_state_dict(torch.load(model_path))

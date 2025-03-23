@@ -12,6 +12,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 
 from models.ccnet import CCNet
 from models.pspnet import PSPNet
+from models.deeplabv3 import deeplabv3_resnet18
 from dataloader import TinySegData
 from evalute import get_confusion_matrix_for_3d,get_confusion_matrix
 import pandas as pd
@@ -73,26 +74,29 @@ def draw_metrics(csv_path, output_dir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train segmentation model')
-    parser.add_argument('--model', type=str, default='pspnet', choices=['pspnet', 'ccnet'], help='Model to use for training')
+    parser.add_argument('--model', type=str, default='pspnet', choices=['pspnet', 'ccnet', 'deeplabv3'], help='Model to use for training')
     parser.add_argument('--batchsize', type=int, default=64, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate for the optimizer')
     parser.add_argument('--tmax', type=int, default=20, help='Maximum number of iterations for CosineAnnealingLR')
     parser.add_argument('--etamin', type=float, default=1e-5, help='Minimum learning rate for CosineAnnealingLR')
+    parser.add_argument('--outputdir', type=str, default='output', help='Directory to save output files')
+    parser.add_argument('--aug', type=str, default='advanced', choices=['none', 'basic', 'advanced'], help='Type of data augmentation to use')
     args = parser.parse_args()
 
     IMG_SIZE = 128
     print ("=> the training size is {}".format(IMG_SIZE))
     classes=6
-    CLASSES = ['person', 'cat', 'plane', 'car', 'bird']
-    epoch = 150
+    CLASSES = ['background', 'person', 'cat', 'plane', 'car', 'bird']
+    epoch = 100
     best_miou=0
     early_stop_patience = 10
-    best_model_name = args.model+"_best_model.pth"
+    best_model_name = args.model+ "_" + args.aug +"_best_model.pth"
+    early_model_name = args.model+ "_" + args.aug+"_early_model.pth"
 
     mkdirs = lambda x: os.makedirs(x, exist_ok=True)
     ckpt_dir = "ckpt_seg"
     mkdirs(ckpt_dir)
-    output_dir = "output_"+args.model
+    output_dir = args.outputdir + "_" + args.model + "_" + args.aug
     mkdirs(output_dir)
     csv_path = os.path.join(output_dir, "metrics.csv")
     if os.path.exists(csv_path):
@@ -103,16 +107,15 @@ if __name__ == "__main__":
     with open(seed_path, 'wb') as f:
         pickle.dump(state_dict, f)
 
-    train_loader = DataLoader(TinySegData(img_size=IMG_SIZE, phase='train'), batch_size=args.batchsize, shuffle=True, num_workers=8)
+    train_loader = DataLoader(TinySegData(img_size=IMG_SIZE, phase='train',aug=args.aug), batch_size=args.batchsize, shuffle=True, num_workers=8)
     val_loader = DataLoader(TinySegData(phase='val'), batch_size=1, shuffle=False, num_workers=0)
-
-    # model = PSPNet(n_classes=classes, pretrained=True)
-    # # model = CCNet(num_classes=classes)
 
     if args.model == 'pspnet':
         model = PSPNet(n_classes=classes, pretrained=True)
     elif args.model == 'ccnet':
         model = CCNet(num_classes=classes)
+    elif args.model == 'deeplabv3':
+        model = deeplabv3_resnet18(num_classes=classes)
 
     # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -122,6 +125,7 @@ if __name__ == "__main__":
     criterion_ce = nn.CrossEntropyLoss()
     criterion_dice = DiceLoss(num_classes=classes)
 
+    best_epoch_metrics={}
     for i in range(0, epoch):
         # train
         model.train()
@@ -174,7 +178,7 @@ if __name__ == "__main__":
                 # plt.title('confusion_matrix_result')
                 # plt.savefig(os.path.join(output_dir, "confusion_matrix_result.png"))
 
-                log_str = "[E{}/{} - {}] ".format(i, epoch, j)
+                log_str = "[E{}/{} - {}] ".format(i+1, epoch, j)
                 log_str += "loss[seg]: {:0.4f}, miou: {:0.4f}, lr: {:0.6f}".format(loss_seg.item(), mean_IU, optimizer.param_groups[0]['lr'])
                 print(log_str)
 
@@ -190,7 +194,7 @@ if __name__ == "__main__":
                 epoch_iou.append(mean_IU)
 
         epoch_iou = np.mean(epoch_iou)
-        print(f"Train:  Epoch {i} Loss: {np.mean(epoch_loss):.4f}, mIoU: {epoch_iou:.4f}, Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"Train:  Epoch {i+1} Loss: {np.mean(epoch_loss):.4f}, mIoU: {epoch_iou:.4f}, Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
 
         # 验证阶段
         model.eval()
@@ -200,6 +204,7 @@ if __name__ == "__main__":
         val_pixel_accuracy= []
         confusion = np.zeros((classes,classes))
         
+        # for j, (images, seg_gts, rets) in enumerate(val_loader):
         for images, seg_gts, sets in val_loader:
             with torch.no_grad():
                 images, seg_gts = images.cuda(), seg_gts.cuda()
@@ -234,10 +239,10 @@ if __name__ == "__main__":
                 # cv2.imwrite(os.path.join(output_dir, "eval_visual.png"), visual_np)
 
         plt.figure(figsize=(10, 8))
-        sns.heatmap(confusion, annot=True, fmt=".2f", xticklabels=CLASSES, yticklabels=CLASSES)
+        sns.heatmap(confusion / confusion.sum(axis=1, keepdims=True) * 100, annot=True, fmt=".2f", xticklabels=CLASSES, yticklabels=CLASSES, cmap="Blues")
         plt.xlabel('Predicted')
         plt.ylabel('True')
-        plt.title('Confusion Matrix')
+        plt.title('Confusion Matrix (%)')
         plt.savefig(os.path.join(output_dir, "confusion.png"))
 
         pos = confusion.sum(1)
@@ -257,7 +262,7 @@ if __name__ == "__main__":
         print ("=> This epoch costs {}s...".format(epoch_time))
 
         epoch_metrics = {
-            'epoch': i,
+            'epoch': i+1,
             'train_loss': np.mean(epoch_loss),
             'val_loss': loss_eval,
             'val_miou': val_iou,
@@ -268,7 +273,7 @@ if __name__ == "__main__":
         with open(csv_path, "a") as f:
             if i == 0:
                 f.write("epoch,train_loss,val_loss,val_miou,pixel_accuracy,dice\n")
-            f.write(f"{i},{np.mean(epoch_loss):.4f},{loss_eval:.4f},{val_iou:.4f},{val_pixel_accuracy:.4f},{dice:.4f}\n")
+            f.write(f"{i+1},{np.mean(epoch_loss):.4f},{loss_eval:.4f},{val_iou:.4f},{val_pixel_accuracy:.4f},{dice:.4f}\n")
            
         # 早停条件
         if val_iou > best_miou:
@@ -279,14 +284,17 @@ if __name__ == "__main__":
         else:
             no_improvement_epochs += 1        
 
-        if no_improvement_epochs >= early_stop_patience:
-            print(f"Early stopping at epoch {i} due to no improvement in validation mIoU for {early_stop_patience} epochs.")
-            print(f"Best epoch metrics: {best_epoch_metrics}")
-            break
+        if no_improvement_epochs == early_stop_patience:
+            print(f"Early stopping at epoch {i+1} due to no improvement in validation mIoU for {early_stop_patience} epochs.")
+            print(f"early_stop Best epoch metrics: {best_epoch_metrics}")
+            torch.save(model.state_dict(), os.path.join(ckpt_dir, f"epoch_{i+1}_{early_model_name}"))
+            # break
         print("no_improvement_epochs:"+str(no_improvement_epochs))
 
         # 在每个 epoch 结束时更新学习率
         scheduler.step()
+
+    print(f"Best epoch metrics: {best_epoch_metrics}")
     
     draw_metrics(csv_path, output_dir)
 

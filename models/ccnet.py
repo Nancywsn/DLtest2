@@ -80,7 +80,6 @@ class RCCAModule(nn.Module):
             nn.Conv2d(self.in_channels + self.inter_channels, self.inter_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(self.inter_channels),
             # nn.Upsample(scale_factor=8, mode="bilinear", align_corners=True),
-            # nn.Upsample(size=(H, W), mode="bilinear", align_corners=True),
             # nn.Conv2d(self.inter_channels, self.num_classes, kernel_size=1)
         )
 
@@ -99,7 +98,6 @@ class RCCAModule(nn.Module):
         # 动态上采样
         upsample = nn.Upsample(size=(H, W), mode="bilinear", align_corners=True)
         output = upsample(output)
-
         output = self.cls_seg2(output)
 
         return output
